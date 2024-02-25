@@ -13,7 +13,11 @@ This codebase provides..
 * ZERO-HUGGINGFACE : If you are interested in not-relying-on-huggingface for training, this is it. This doesn't use accelerate, transformer, etc, so you have maximal control. (still uses `default_data_collator` and `get_scheduler`, but its really easy to get rid of)
 * Good Deepspeed codebase.
 
+-- Tested on 8x 80GB A100 GPUs.
+
 ---
 
 todo : 
-llama, test multi-node training, mu-scaling plot, etc.
+- [ ] multi-node training
+- [ ] mu-scaling plot
+- [ ] test on llama 
