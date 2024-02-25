@@ -46,6 +46,7 @@ class CustomAttention(nn.Module):
 
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v)) # [B nh L d]
 
+        # torch version should be greater than 2.1.0 to use scale kwarg (https://github.com/pytorch/pytorch/pull/95259)
         attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=True, scale = 1/self.head_dim) # mup
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, seq_length, self.embed_dim

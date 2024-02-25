@@ -1,5 +1,4 @@
-export CUDA_VISIBLE_DEVICES=4
-export WORLD_SIZE=1
+export WORLD_SIZE=$(nvidia-smi -L | wc -l)
 #!/bin/bash
 
 lrs=(4e-4 8e-4 2e-3 4e-3)
