@@ -216,6 +216,11 @@ def main(
     learning_rate = args.lr
     width = args.width
     run_name = args.run_name
+    run_name = args.run_name
+
+    if run_name is None:
+        run_name = f"{learning_rate}_{width}_{train_batch_size}"
+
 
     if width > 32:
         per_device_train_batch_size = 32
