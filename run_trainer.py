@@ -1,27 +1,24 @@
+# very much based on deepspeed-examples.
+# https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/main.py
+
+import argparse
+import json
+import math
+
+import deepspeed
+import matplotlib.pyplot as plt
 import torch
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
+import wandb
+from datasets import load_dataset
+from deepspeed import get_accelerator
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from torch.utils.data import (DataLoader, Dataset, RandomSampler,
+                              SequentialSampler)
+from torch.utils.data.distributed import DistributedSampler
+from transformers import AutoTokenizer, default_data_collator, get_scheduler
 
-import wandb
-import deepspeed
-from deepspeed import get_accelerator
-from datasets import load_dataset
-import math
-import matplotlib.pyplot as plt
-import argparse
-
-from transformers import (
-    default_data_collator,
-    get_scheduler,
-)
-
-import json
-
-from tweakablegpt import GPTModel, GPTConfig
+from tweakablegpt import GPTConfig, GPTModel
 
 
 class WikiTextDataset(Dataset):
@@ -50,16 +47,15 @@ class WikiTextDataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        return {
-            "input_ids": inputs.input_ids.squeeze()
-        }
+        return {"input_ids": inputs.input_ids.squeeze()}
+
 
 def train(model, train_loader, device, ds_engine):
     model.train()
     total_loss = 0
     for batch_idx, batch in enumerate(train_loader):
-        input_ids = batch['input_ids'].to(device)
-       
+        input_ids = batch["input_ids"].to(device)
+
         outputs = model(input_ids)
         loss = outputs["loss"]
         total_loss += loss.item()
@@ -86,26 +82,27 @@ def validate(model, val_loader, device):
     total_loss = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
-            input_ids = batch['input_ids'].to(device)
+            input_ids = batch["input_ids"].to(device)
             outputs = model(input_ids)
             loss = outputs["loss"]
             total_loss += loss.float()
-        try:
-            total_loss = get_all_reduce_mean(total_loss)
-        except:
-            pass
-        try:
-            perplexity = torch.exp(total_loss).item()
-        except OverflowError:
-            perplexity = float("inf")
 
-    avg_loss = total_loss / len(val_loader)
-    return avg_loss, perplexity
+    losses = total_loss / len(val_loader)
+
+    try:
+        losses = get_all_reduce_mean(losses)
+    except:
+        pass
+
+    try:
+        perplexity = torch.exp(losses).item()
+    except OverflowError:
+        perplexity = float("inf")
+
+    return losses, perplexity
 
 
-def plot_hidden_states(
-    model, input_ids, device, filename="hidden_states_plot.png"
-):
+def plot_hidden_states(model, input_ids, device, filename="hidden_states_plot.png"):
     with torch.no_grad():
         outputs = model(
             input_ids.to(device),
@@ -136,9 +133,11 @@ import os
 
 def _z3_params_to_fetch(param_list):
     return [
-        p for p in param_list
-        if hasattr(p, 'ds_id') and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        p
+        for p in param_list
+        if hasattr(p, "ds_id") and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
     ]
+
 
 def save_zero_three_model(model_ema, global_rank, save_dir, zero_stage=0):
     zero_stage_3 = zero_stage == 3
@@ -168,7 +167,7 @@ def save_zero_three_model(model_ema, global_rank, save_dir, zero_stage=0):
 
 
 def main(
-    per_device_train_batch_size=64,
+    per_device_train_batch_size=32,
     train_batch_size=2048,
     weight_decay=0.1,
     num_train_epochs=1,
@@ -205,11 +204,18 @@ def main(
         help="lr",
     )
 
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+    )
+
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
     learning_rate = args.lr
-    width = args.width 
+    width = args.width
+    run_name = args.run_name
 
     if width > 32:
         per_device_train_batch_size = 32
@@ -247,6 +253,7 @@ def main(
         wandb.init(
             project="mup",
             entity="simo",
+            name=run_name,
             config={
                 "learning_rate": learning_rate,
                 "weight_decay": weight_decay,
@@ -312,7 +319,7 @@ def main(
         sampler=eval_sampler,
         batch_size=per_device_train_batch_size * 2,
     )
-    
+
     # CONFIG DECAY.
 
     no_decay_name_list = [
@@ -331,24 +338,25 @@ def main(
                 group_parameters["weight_decay"] = 0.0
             else:
                 group_parameters["weight_decay"] = weight_decay
-            
-            # Define learning rate for specific types of pa rameters
+
+            # Define learning rate for specific types of params
 
             is_embed = "embed" in n
             if "embed" in n or any(ndnl in n for ndnl in no_decay_name_list):
                 group_parameters["lr"] = learning_rate * (10.0 if is_embed else 1.0)
             else:
-                group_parameters["lr"] = learning_rate * 1/width
-            
+                group_parameters["lr"] = learning_rate * 1 / width
+
             group_parameters["params"] = [p]
-            final_optimizer_settings[n] = {'lr' : group_parameters["lr"], "wd" : group_parameters['weight_decay']}
+            final_optimizer_settings[n] = {
+                "lr": group_parameters["lr"],
+                "wd": group_parameters["weight_decay"],
+            }
             optimizer_grouped_parameters.append(group_parameters)
 
-  
     # View the settings, see if anything is wrong.
-    with open('./opt_config.json', 'w') as json_file:
+    with open("./opt_config.json", "w") as json_file:
         json.dump(final_optimizer_settings, json_file, indent=4)
-
 
     AdamOptimizer = DeepSpeedCPUAdam if offload else FusedAdam
 
@@ -375,18 +383,20 @@ def main(
         )
 
         print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss}")
-        eval_loss, perp = validate(model, val_loader, device=device)
+        eval_loss, perp = validate(model_engine, val_loader, device=device)
         if global_rank == 0:
             print(f"Eval loss : {eval_loss}")
             wandb.log({"ppl": perp, "loss": eval_loss, "epoch": epoch})
 
         saving_output_dir = os.path.join(output_dir, f"step_{epoch}_final")
 
-        save_zero_three_model(model, global_rank, saving_output_dir, zero_stage=3)
+        save_zero_three_model(
+            model_engine, global_rank, saving_output_dir, zero_stage=3
+        )
 
         for input_ids in train_loader:
             plot_hidden_states(
-                model['input_ids'],
+                model["input_ids"],
                 input_ids,
                 model_engine.device,
                 filename=f"hidden_states_epoch_{epoch+1}.png",
@@ -396,4 +406,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-    

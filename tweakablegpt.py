@@ -41,13 +41,17 @@ class CustomAttention(nn.Module):
         batch_size, seq_length, _ = x.size()
         qkv = self.qkv_proj(x)
 
-        qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3 * self.head_dim) # [B, L, nh, 3 * d]
+        qkv = qkv.reshape(
+            batch_size, seq_length, self.num_heads, 3 * self.head_dim
+        )  # [B, L, nh, 3 * d]
         q, k, v = qkv.chunk(3, dim=-1)
 
-        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v)) # [B nh L d]
+        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))  # [B nh L d]
 
         # torch version should be greater than 2.1.0 to use scale kwarg (https://github.com/pytorch/pytorch/pull/95259)
-        attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=True, scale = 1/self.head_dim) # mup
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, is_causal=True, scale=1 / self.head_dim
+        )  # mup
         attn_output = attn_output.transpose(1, 2).reshape(
             batch_size, seq_length, self.embed_dim
         )
