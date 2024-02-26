@@ -13,8 +13,7 @@ from datasets import load_dataset
 from deepspeed import get_accelerator
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from torch.utils.data import (DataLoader, Dataset, RandomSampler,
-                              SequentialSampler)
+from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, default_data_collator, get_scheduler
 
@@ -35,7 +34,7 @@ class WikiTextDataset(Dataset):
         self.max_length = max_length
 
     def __len__(self):
-        return len(self.dataset) if (self.vernum == 103) else 32
+        return int(len(self.dataset) * 0.1) if (self.vernum == 103) else 32
 
     def __getitem__(self, idx):
         text = self.dataset[idx]["text"]
@@ -98,6 +97,8 @@ def validate(model, val_loader, device):
         perplexity = torch.exp(losses).item()
     except OverflowError:
         perplexity = float("inf")
+
+    model.train()
 
     return losses, perplexity
 
@@ -172,14 +173,14 @@ def main(
     weight_decay=0.1,
     num_train_epochs=1,
     lr_scheduler_type="linear",
-    num_warmup_steps=100,
+    num_warmup_steps=0,
     seed=42,
     gradient_checkpointing=True,
     zero_stage=3,
     output_dir="output",
     data_output_path="data",
     offload=True,
-    debug=False,
+    debug=True,
     width=2,
 ):
     parser = argparse.ArgumentParser()
@@ -221,7 +222,6 @@ def main(
     if run_name is None:
         run_name = f"{learning_rate}_{width}_{train_batch_size}"
 
-
     if width > 32:
         per_device_train_batch_size = 32
 
@@ -236,7 +236,6 @@ def main(
     ds_config = {
         "train_micro_batch_size_per_gpu": per_device_train_batch_size,
         "train_batch_size": train_batch_size,
-        "optimizer": {"type": "AdamW", "params": {"lr": learning_rate}},
         "zero_optimization": {
             "stage": zero_stage,
             "offload_param": {"device": offload_device},
@@ -304,12 +303,12 @@ def main(
     train_sampler = (
         RandomSampler(train_dataset)
         if local_rank == -1
-        else DistributedSampler(train_dataset)
+        else DistributedSampler(train_dataset, seed=seed)
     )
     eval_sampler = (
         SequentialSampler(val_dataset)
         if local_rank == -1
-        else DistributedSampler(val_dataset)
+        else DistributedSampler(val_dataset, seed=seed)
     )
 
     train_loader = DataLoader(
@@ -348,7 +347,7 @@ def main(
 
             is_embed = "embed" in n
             if "embed" in n or any(ndnl in n for ndnl in no_decay_name_list):
-                group_parameters["lr"] = learning_rate * (10.0 if is_embed else 1.0)
+                group_parameters["lr"] = learning_rate * (3.3 if is_embed else 1.0)
             else:
                 group_parameters["lr"] = learning_rate * 1 / width
 
@@ -377,9 +376,7 @@ def main(
     )
 
     model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
-        model=model,
-        config=ds_config,
-        lr_scheduler=lr_scheduler,
+        model=model, config=ds_config, lr_scheduler=lr_scheduler, optimizer=optimizer
     )
 
     for epoch in range(num_train_epochs):
@@ -399,14 +396,14 @@ def main(
             model_engine, global_rank, saving_output_dir, zero_stage=3
         )
 
-        for input_ids in train_loader:
-            plot_hidden_states(
-                model["input_ids"],
-                input_ids,
-                model_engine.device,
-                filename=f"hidden_states_epoch_{epoch+1}.png",
-            )
-            break
+        # for input_ids in train_loader:
+        #     plot_hidden_states(
+        #         model["input_ids"],
+        #         input_ids,
+        #         model_engine.device,
+        #         filename=f"hidden_states_epoch_{epoch+1}.png",
+        #     )
+        #     break
 
 
 if __name__ == "__main__":

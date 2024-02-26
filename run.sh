@@ -1,8 +1,8 @@
 export WORLD_SIZE=$(nvidia-smi -L | wc -l)
 #!/bin/bash
 
-lrs=(1e-4 2e-4)
-widths=(16 32 64)
+lrs=(5e-4)
+widths=(16 32 64 128)
 
 for lr in "${lrs[@]}"; do
     for width in "${widths[@]}"; do

@@ -75,7 +75,9 @@ class GPTBlock(nn.Module):
 
         for name, param in self.mlp.named_parameters():
             if "weight" in name:
-                init.normal_(param, mean=0, std=(1 / config.n_embd) ** 0.5)
+                init.normal_(param, mean=0, std=0.5 * (1 / config.n_embd) ** 0.5)
+            else:
+                init.zeros_(param)
 
     def forward(self, x):
         attn_output = self.attention(self.ln_1(x))
