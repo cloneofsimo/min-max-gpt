@@ -19,6 +19,9 @@ from transformers import AutoTokenizer, default_data_collator, get_scheduler
 
 from tweakablegpt import GPTConfig, GPTModel
 
+from deepspeed.utils import logger
+from memory_profile_utils import print_memory_with_message
+
 
 class WikiTextDataset(Dataset):
     def __init__(self, tokenizer, type_path="train", max_length=512, debug=False):
@@ -38,7 +41,7 @@ class WikiTextDataset(Dataset):
 
     def __getitem__(self, idx):
         text = self.dataset[idx]["text"]
-        # print(text)
+        # logger.info(text)
         inputs = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -49,21 +52,24 @@ class WikiTextDataset(Dataset):
         return {"input_ids": inputs.input_ids.squeeze()}
 
 
-def train(model, train_loader, device, ds_engine):
-    model.train()
+def train(args, ds_engine, train_loader, device):
+    ds_engine.train()
     total_loss = 0
     for batch_idx, batch in enumerate(train_loader):
         input_ids = batch["input_ids"].to(device)
 
-        outputs = model(input_ids)
+        outputs = ds_engine(input_ids)
         loss = outputs["loss"]
         total_loss += loss.item()
         if torch.distributed.get_rank() == 0:
-            print(f"loss : {loss.item()}")
+            logger.info(f"loss : {loss.item()}")
             wandb.log({"trainloss": loss.item()})
 
         ds_engine.backward(loss)
         ds_engine.step()
+        if args.print_profile_results:
+            print_memory_with_message(torch.distributed.get_rank(), device)
+
         get_accelerator().empty_cache()
 
     avg_loss = total_loss / len(train_loader)
@@ -211,12 +217,16 @@ def main(
         default=None,
     )
 
+    parser.add_argument(
+        "--print_profile_results",
+        action='store_true',
+    )
+
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
     learning_rate = args.lr
     width = args.width
-    run_name = args.run_name
     run_name = args.run_name
 
     if run_name is None:
@@ -226,9 +236,13 @@ def main(
         per_device_train_batch_size = 32
 
     local_rank = args.local_rank
-    deepspeed.init_distributed()
-    device = torch.device(get_accelerator().device_name())
-    get_accelerator().set_device(args.local_rank)
+    if local_rank == -1:
+        device = torch.device(get_accelerator().device_name())
+    else:
+        get_accelerator().set_device(local_rank)
+        device = torch.device(get_accelerator().device_name(), local_rank)
+        # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        deepspeed.init_distributed()
 
     # offload?
     offload_device = "cpu" if offload else "none"
@@ -247,6 +261,7 @@ def main(
         },
         "bfloat16": {"enabled": True},
         "gradient_clipping": 1.0,
+        "wall_clock_breakdown": True if args.print_profile_results else False
     }
 
     torch.distributed.barrier()
@@ -295,7 +310,7 @@ def main(
     total_params = sum(p.numel() for p in model.parameters())
     size_in_bytes = total_params * 4
     size_in_gb = size_in_bytes / (1024**3)
-    print(f"Model Size: {size_in_bytes}, {size_in_gb} GB")
+    logger.info(f"Model Size: {size_in_bytes}, {size_in_gb} GB")
 
     train_dataset = WikiTextDataset(tokenizer, "train", debug=debug)
     val_dataset = WikiTextDataset(tokenizer, "validation", debug=debug)
@@ -381,13 +396,13 @@ def main(
 
     for epoch in range(num_train_epochs):
         avg_train_loss = train(
-            model_engine, train_loader, model_engine.device, model_engine
+            args, model_engine, train_loader, model_engine.device
         )
 
-        print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss}")
+        logger.info(f"Epoch {epoch+1}, Train Loss: {avg_train_loss}")
         eval_loss, perp = validate(model_engine, val_loader, device=device)
         if global_rank == 0:
-            print(f"Eval loss : {eval_loss}")
+            logger.info(f"Eval loss : {eval_loss}")
             wandb.log({"ppl": perp, "loss": eval_loss, "epoch": epoch})
 
         saving_output_dir = os.path.join(output_dir, f"step_{epoch}_final")
