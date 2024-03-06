@@ -395,6 +395,10 @@ def main(
     )
 
     for epoch in range(num_train_epochs):
+        if local_rank == -1:
+            pass
+        else:
+            train_sampler.set_epoch(epoch)
         avg_train_loss = train(
             args, model_engine, train_loader, model_engine.device
         )
