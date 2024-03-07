@@ -1,26 +1,26 @@
 # very much based on deepspeed-examples.
 # https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/main.py
 
-import argparse
 import json
 import math
 
+import click
 import deepspeed
 import matplotlib.pyplot as plt
 import torch
-import wandb
 from datasets import load_dataset
 from deepspeed import get_accelerator
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+from deepspeed.utils import logger
+from torch.utils.data import (DataLoader, Dataset, RandomSampler,
+                              SequentialSampler)
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, default_data_collator, get_scheduler
 
-from tweakablegpt import GPTConfig, GPTModel
-
-from deepspeed.utils import logger
+import wandb
 from memory_profile_utils import print_memory_with_message
+from tweakablegpt import GPTConfig, GPTModel
 
 
 class WikiTextDataset(Dataset):
@@ -52,7 +52,7 @@ class WikiTextDataset(Dataset):
         return {"input_ids": inputs.input_ids.squeeze()}
 
 
-def train(args, ds_engine, train_loader, device):
+def train(ds_engine, train_loader, device, print_profile_results):
     ds_engine.train()
     total_loss = 0
     for batch_idx, batch in enumerate(train_loader):
@@ -67,7 +67,7 @@ def train(args, ds_engine, train_loader, device):
 
         ds_engine.backward(loss)
         ds_engine.step()
-        if args.print_profile_results:
+        if print_profile_results:
             print_memory_with_message(torch.distributed.get_rank(), device)
 
         get_accelerator().empty_cache()
@@ -109,32 +109,6 @@ def validate(model, val_loader, device):
     return losses, perplexity
 
 
-def plot_hidden_states(model, input_ids, device, filename="hidden_states_plot.png"):
-    with torch.no_grad():
-        outputs = model(
-            input_ids.to(device),
-            output_hidden_states=True,
-        )
-        hidden_states = outputs["hidden_states"]  # [layers, batch, token, features]
-
-        hs_flattened_per_layer = [
-            hs.permute(1, 2, 0).contiguous().view(-1, hs.size(-1)).cpu().numpy()
-            for hs in hidden_states
-        ]
-        fig, axes = plt.subplots(
-            nrows=len(hs_flattened_per_layer),
-            figsize=(10, 2 * len(hs_flattened_per_layer)),
-        )
-
-        for i, hs in enumerate(hs_flattened_per_layer):
-            axes[i].violinplot(hs, showmeans=False, showmedians=True)
-            axes[i].set_title(f"Layer {i+1}")
-
-        plt.tight_layout()
-        plt.savefig(filename)
-        plt.close()
-
-
 import os
 
 
@@ -173,69 +147,63 @@ def save_zero_three_model(model_ema, global_rank, save_dir, zero_stage=0):
         del output_state_dict
 
 
+@click.command()
+@click.option("--num_warmup_steps", default=0, help="Number of warmup steps")
+@click.option("--seed", default=42, help="Random seed")
+@click.option(
+    "--gradient_checkpointing", default=True, help="Use gradient checkpointing"
+)
+@click.option("--zero_stage", default=3, help="Zero stage for gradient checkpointing")
+@click.option("--output_dir", default="output", help="Output directory")
+@click.option("--offload", default=True, help="Offload computation")
+@click.option("--debug", is_flag=True, help="Debug mode")
+@click.option("--run_name", default=None, help="Run name")
+@click.option("--print_profile_results", is_flag=True, help="Print Deepspeed Profiling")
+@click.option("--local_rank", default=-1, help="Local rank")
+@click.option("--n_head", default=4, help="Number of heads")
+@click.option("--n_layer", default=12, help="Number of layers")
+@click.option(
+    "--head_width",
+    default=2,
+    help="Width of the Head, total dim is head_width * n_head",
+)
+@click.option(
+    "--per_device_train_batch_size", default=32, help="Per device training batch size"
+)
+@click.option("--train_batch_size", default=2048, help="Total training batch size")
+@click.option("--learning_rate", default=1e-3, help="Learning rate")
+@click.option("--weight_decay", default=0.1, help="Weight decay for optimization")
+@click.option("--num_train_epochs", default=1, help="Number of training epochs")
+@click.option(
+    "--lr_scheduler_type", default="linear", help="Type of learning rate scheduler"
+)
 def main(
-    per_device_train_batch_size=32,
-    train_batch_size=2048,
-    weight_decay=0.1,
-    num_train_epochs=1,
-    lr_scheduler_type="linear",
-    num_warmup_steps=0,
-    seed=42,
-    gradient_checkpointing=True,
-    zero_stage=3,
-    output_dir="output",
-    data_output_path="data",
-    offload=True,
-    debug=True,
-    width=2,
+    num_warmup_steps,
+    seed,
+    gradient_checkpointing,
+    zero_stage,
+    output_dir,
+    offload,
+    debug,
+    run_name,
+    local_rank,
+    print_profile_results,
+    n_head,
+    n_layer,
+    head_width,
+    per_device_train_batch_size,
+    train_batch_size,
+    learning_rate,
+    weight_decay,
+    num_train_epochs,
+    lr_scheduler_type,
 ):
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="local rank passed from distributed launcher",
-    )
-
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=2,
-        help="wdith",
-    )
-
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-4,
-        help="lr",
-    )
-
-    parser.add_argument(
-        "--run_name",
-        type=str,
-        default=None,
-    )
-
-    parser.add_argument(
-        "--print_profile_results",
-        action='store_true',
-    )
-
-    parser = deepspeed.add_config_arguments(parser)
-    args = parser.parse_args()
-
-    learning_rate = args.lr
-    width = args.width
-    run_name = args.run_name
-
     if run_name is None:
-        run_name = f"{learning_rate}_{width}_{train_batch_size}"
+        run_name = f"LR:{learning_rate}_HeadWidth:{head_width}_TotalBS:{train_batch_size}_Nhead:{n_head}_NLayer:{n_layer}"
 
-    if width > 32:
+    if head_width > 32:
         per_device_train_batch_size = 32
 
-    local_rank = args.local_rank
     if local_rank == -1:
         device = torch.device(get_accelerator().device_name())
     else:
@@ -261,7 +229,7 @@ def main(
         },
         "bfloat16": {"enabled": True},
         "gradient_clipping": 1.0,
-        "wall_clock_breakdown": True if args.print_profile_results else False
+        "wall_clock_breakdown": print_profile_results,
     }
 
     torch.distributed.barrier()
@@ -270,8 +238,6 @@ def main(
     # Initialize WANDB
     if global_rank == 0:
         wandb.init(
-            project="mup",
-            entity="simo",
             name=run_name,
             config={
                 "learning_rate": learning_rate,
@@ -283,9 +249,10 @@ def main(
                 "gradient_checkpointing": gradient_checkpointing,
                 "zero_stage": zero_stage,
                 "output_dir": output_dir,
-                "data_output_path": data_output_path,
                 "offload": offload,
-                "width": width,
+                "head_width": head_width,
+                "Nhead": n_head,
+                "NLayer": n_layer,
             },
         )
 
@@ -295,9 +262,9 @@ def main(
     config = GPTConfig(
         vocab_size=len(tokenizer),
         max_position_embeddings=512,
-        n_head=32,
-        n_layer=20,
-        n_embd=32 * width,
+        n_head=n_head,
+        n_layer=n_layer,
+        n_embd=n_head * head_width,
     )
 
     # zero-init
@@ -364,7 +331,7 @@ def main(
             if "embed" in n or any(ndnl in n for ndnl in no_decay_name_list):
                 group_parameters["lr"] = learning_rate * (3.3 if is_embed else 1.0)
             else:
-                group_parameters["lr"] = learning_rate * 1 / width
+                group_parameters["lr"] = learning_rate * (1 / head_width)
 
             group_parameters["params"] = [p]
             final_optimizer_settings[n] = {
@@ -399,8 +366,9 @@ def main(
             pass
         else:
             train_sampler.set_epoch(epoch)
+
         avg_train_loss = train(
-            args, model_engine, train_loader, model_engine.device
+            model_engine, train_loader, model_engine.device, print_profile_results
         )
 
         logger.info(f"Epoch {epoch+1}, Train Loss: {avg_train_loss}")
@@ -415,14 +383,6 @@ def main(
             model_engine, global_rank, saving_output_dir, zero_stage=3
         )
 
-        # for input_ids in train_loader:
-        #     plot_hidden_states(
-        #         model["input_ids"],
-        #         input_ids,
-        #         model_engine.device,
-        #         filename=f"hidden_states_epoch_{epoch+1}.png",
-        #     )
-        #     break
 
 
 if __name__ == "__main__":
