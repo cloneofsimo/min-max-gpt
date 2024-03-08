@@ -30,7 +30,7 @@ pip install -r requirements.txt
 ROOT_DIR=/path/to/dir/min-max-gpt
 cd $ROOT_DIR
 export WORLD_SIZE=$(nvidia-smi -L | wc -l)
-deepspeed --num_gpus $WORLD_SIZE run_trainer.py --lr 1e-4 --width 32 --run_name "test"
+deepspeed --num_gpus $WORLD_SIZE run_trainer.py --learning_rate 1e-4 --head_width 32 --run_name "test"
 ```
 
 - Multi-node training:
