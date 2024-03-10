@@ -4,6 +4,9 @@
 import json
 import math
 
+import random
+import numpy as np
+
 import click
 import deepspeed
 import matplotlib.pyplot as plt
@@ -147,12 +150,19 @@ def save_zero_three_model(model_ema, global_rank, save_dir, zero_stage=0):
         del output_state_dict
 
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 @click.command()
 @click.option("--num_warmup_steps", default=0, help="Number of warmup steps")
 @click.option("--seed", default=42, help="Random seed")
-@click.option(
-    "--gradient_checkpointing", default=True, help="Use gradient checkpointing"
-)
+@click.option("--gradient_checkpointing", default=True, help="Use gradient checkpointing")
+@click.option("--gradient_checkpointing_offload", default=True, help="Use gradient checkpointing")
+@click.option("--gradient_checkpointing_num_checkpoints", default=3, help="Use gradient checkpointing")
 @click.option("--zero_stage", default=3, help="Zero stage for gradient checkpointing")
 @click.option("--output_dir", default="output", help="Output directory")
 @click.option("--offload", default=True, help="Offload computation")
@@ -181,6 +191,8 @@ def main(
     num_warmup_steps,
     seed,
     gradient_checkpointing,
+    gradient_checkpointing_offload,
+    gradient_checkpointing_num_checkpoints,
     zero_stage,
     output_dir,
     offload,
@@ -198,11 +210,13 @@ def main(
     num_train_epochs,
     lr_scheduler_type,
 ):
+    set_seed(seed) # see seed first for reproduction
+
     if run_name is None:
         run_name = f"LR:{learning_rate}_HeadWidth:{head_width}_TotalBS:{train_batch_size}_Nhead:{n_head}_NLayer:{n_layer}"
 
-    if head_width > 32:
-        per_device_train_batch_size = 32
+    # if head_width > 32:
+    #     per_device_train_batch_size = 32
 
     if local_rank == -1:
         device = torch.device(get_accelerator().device_name())
@@ -231,6 +245,17 @@ def main(
         "gradient_clipping": 1.0,
         "wall_clock_breakdown": print_profile_results,
     }
+
+    if gradient_checkpointing:
+        gradient_checkpointing_dict = { # customize me ! (https://deepspeed.readthedocs.io/en/latest/activation-checkpointing.html)
+            "partition_activations": False,
+            "cpu_checkpointing": gradient_checkpointing_offload,
+            "contiguous_memory_optimization": False,
+            "number_checkpoints": gradient_checkpointing_num_checkpoints,
+            "synchronize_checkpoint_boundary": False,
+            "profile": False
+        }
+        ds_config['activation_checkpointing'] = gradient_checkpointing_dict
 
     torch.distributed.barrier()
     global_rank = torch.distributed.get_rank()
@@ -270,6 +295,10 @@ def main(
     # zero-init
     with deepspeed.zero.Init():
         model = GPTModel(config)
+
+    # activation (or gradient) checkpointing
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enabled(ds_config)
 
     model.train()
 
