@@ -1,4 +1,5 @@
 __pycache__
 wandb
 output
-opt_config.json
+opt_config.
+run_w*.sh
