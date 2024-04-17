@@ -101,6 +101,12 @@ class GPTModel(nn.Module):
 
         init.normal_(self.head.weight, mean=0, std=alpha * (1 / config.n_embd))
         init.normal_(self.embed.weight, mean=0, std=alpha * 3.3)
+    
+    def gradient_checkpointing_enabled(self, ds_config):
+        from deepspeed.runtime.activation_checkpointing import checkpointing
+        checkpointing.configure(mpu_=None, deepspeed_config=ds_config)
+        self._gradient_checkpointing_func = checkpointing.checkpoint
+        self.num_checkpoints = ds_config['activation_checkpointing']['number_checkpoints']
 
     def forward(self, input_ids, attention_mask=None, output_hidden_states=False):
         position_ids = torch.arange(
@@ -112,10 +118,27 @@ class GPTModel(nn.Module):
         x = self.embed(input_ids) + self.pos_embed[:, : input_ids.size(1), :]
         if output_hidden_states:
             hidden_states.append(x)
-        for block in self.blocks:
-            x = block(x)
-            if output_hidden_states:
-                hidden_states.append(x)
+        print('x.size()', x.size())
+
+        if hasattr(self, '_gradient_checkpointing_func') and self.training:
+            l, total_num_layers = 0, len(self.blocks)
+            def custom(start, end):
+                def custom_forward(x):
+                    for i, layer in enumerate(self.blocks[start:end]):
+                        x = layer(x)
+                    return x
+                return custom_forward
+
+            while l < total_num_layers:
+                if output_hidden_states: 
+                    raise NotImplementedError("idc layerwise output :)")
+                x = self._gradient_checkpointing_func(custom(l, l+self.num_checkpoints), x)
+                l += self.num_checkpoints
+        else:
+            for block in self.blocks:
+                x = block(x)
+                if output_hidden_states:
+                    hidden_states.append(x)
 
         x = self.ln_f(x)
         logits = self.head(x).float()
